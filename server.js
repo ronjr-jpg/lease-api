@@ -225,7 +225,7 @@ async function fillTemplate(templatePath, data) {
     try {
       // LibreOffice headless conversion
       execSync(
-  `"C:\\Program Files\\LibreOffice\\program\\soffice.exe" --headless --convert-to pdf --outdir "${tempDir}" "${tempDocxPath}"`,
+  `libreoffice --headless --convert-to pdf --outdir "${tempDir}" "${tempDocxPath}"`,
   { timeout: 30000 }
       );
     } catch (conversionError) {
