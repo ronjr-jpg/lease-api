@@ -7,6 +7,7 @@ const AWS = require('aws-sdk');
 const fs = require('fs');
 const path = require('path');
 const { execSync } = require('child_process');
+const { PDFDocument } = require('pdf-lib');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -23,7 +24,6 @@ const s3Config = {
   signatureVersion: 'v4'
 };
 
-// Add endpoint if using Cloudflare R2 or other S3-compatible service
 if (process.env.S3_ENDPOINT) {
   s3Config.endpoint = process.env.S3_ENDPOINT;
   s3Config.s3ForcePathStyle = true;
@@ -43,55 +43,99 @@ app.get('/', (req, res) => {
 // Main endpoint: Generate lease document
 app.post('/api/generate-lease', async (req, res) => {
   try {
-    const { leaseData, templateName, selectedAddenda = [] } = req.body;
+    const { 
+      leaseData, 
+      templateName, 
+      selectedAddenda = [],
+      pdfForms = [],
+      staticPdfs = []
+    } = req.body;
 
     console.log('Generating lease:', {
       template: templateName,
-      leaseId: leaseData.lease_id,
-      addenda: selectedAddenda
+      leaseId: leaseData?.lease_id,
+      addenda: selectedAddenda,
+      pdfForms: pdfForms.length,
+      staticPdfs: staticPdfs.length
     });
 
-    // Validate required fields
-    if (!leaseData || !templateName) {
+    if (!leaseData) {
       return res.status(400).json({
         success: false,
-        error: 'Missing required fields: leaseData and templateName'
+        error: 'Missing required field: leaseData'
       });
     }
 
-    // 1. Load and fill the base template
-    const baseTemplatePath = path.join(__dirname, 'templates', `${templateName}.docx`);
-    
-    if (!fs.existsSync(baseTemplatePath)) {
-      return res.status(404).json({
-        success: false,
-        error: `Template not found: ${templateName}.docx`
-      });
-    }
+    const pdfBuffers = [];
 
-    const basePdfBuffer = await fillTemplate(baseTemplatePath, leaseData);
+    // 1. Process base Word template (if provided)
+    if (templateName) {
+      const baseTemplatePath = path.join(__dirname, 'templates', `${templateName}.docx`);
+      
+      if (!fs.existsSync(baseTemplatePath)) {
+        return res.status(404).json({
+          success: false,
+          error: `Template not found: ${templateName}.docx`
+        });
+      }
+
+      const basePdfBuffer = await fillWordTemplate(baseTemplatePath, leaseData);
+      pdfBuffers.push({ name: templateName, buffer: basePdfBuffer });
+    }
     
-    // 2. Generate addenda PDFs if any selected
-    const addendaPdfBuffers = [];
+    // 2. Process Word addenda
     for (const addendumName of selectedAddenda) {
       const addendumPath = path.join(__dirname, 'templates', 'addenda', `${addendumName}.docx`);
       
       if (fs.existsSync(addendumPath)) {
-        const addendumPdf = await fillTemplate(addendumPath, leaseData);
-        addendaPdfBuffers.push(addendumPdf);
+        const addendumPdf = await fillWordTemplate(addendumPath, leaseData);
+        pdfBuffers.push({ name: addendumName, buffer: addendumPdf });
       } else {
         console.warn(`Addendum not found: ${addendumName}.docx`);
       }
     }
 
-    // 3. Merge PDFs (base + addenda)
-    let finalPdfBuffer = basePdfBuffer;
-    
-    if (addendaPdfBuffers.length > 0) {
-      console.log(`Generated ${addendaPdfBuffers.length} addenda (merging not yet implemented)`);
+    // 3. Process PDF forms (fill and flatten)
+    for (const pdfForm of pdfForms) {
+      const templateFile = typeof pdfForm === 'string' ? pdfForm : pdfForm.template;
+      const fieldMappings = typeof pdfForm === 'object' ? pdfForm.fieldMappings : {};
+      
+      const pdfPath = path.join(__dirname, 'templates', 'pdf-forms', templateFile);
+      
+      if (fs.existsSync(pdfPath)) {
+        const filledPdf = await fillPdfForm(pdfPath, leaseData, fieldMappings);
+        pdfBuffers.push({ name: templateFile, buffer: filledPdf });
+      } else {
+        console.warn(`PDF form not found: ${templateFile}`);
+      }
     }
 
-    // 4. Upload to S3
+    // 4. Process static PDFs
+    for (const staticPdf of staticPdfs) {
+      const pdfPath = path.join(__dirname, 'templates', 'static-pdfs', staticPdf);
+      
+      if (fs.existsSync(pdfPath)) {
+        const pdfBuffer = fs.readFileSync(pdfPath);
+        pdfBuffers.push({ name: staticPdf, buffer: pdfBuffer });
+      } else {
+        console.warn(`Static PDF not found: ${staticPdf}`);
+      }
+    }
+
+    // 5. Merge all PDFs
+    let finalPdfBuffer;
+    if (pdfBuffers.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'No documents to generate. Provide templateName, pdfForms, or staticPdfs.'
+      });
+    } else if (pdfBuffers.length === 1) {
+      finalPdfBuffer = pdfBuffers[0].buffer;
+    } else {
+      finalPdfBuffer = await mergePdfs(pdfBuffers.map(p => p.buffer));
+    }
+
+    // 6. Upload to S3
     const fileName = `lease-${leaseData.lease_id || Date.now()}.pdf`;
     const s3Key = `leases/${fileName}`;
     
@@ -104,14 +148,12 @@ app.post('/api/generate-lease', async (req, res) => {
 
     const uploadResult = await s3.upload(uploadParams).promise();
     
-    // Generate a presigned URL for preview (valid for 1 hour)
     const previewUrl = s3.getSignedUrl('getObject', {
       Bucket: process.env.S3_BUCKET_NAME,
       Key: s3Key,
       Expires: 3600
     });
 
-    // 5. Return success response
     res.json({
       success: true,
       pdfUrl: uploadResult.Location,
@@ -121,7 +163,10 @@ app.post('/api/generate-lease', async (req, res) => {
       metadata: {
         leaseId: leaseData.lease_id,
         template: templateName,
-        addenda: selectedAddenda
+        addenda: selectedAddenda,
+        pdfForms: pdfForms.map(p => typeof p === 'string' ? p : p.template),
+        staticPdfs: staticPdfs,
+        totalDocuments: pdfBuffers.length
       }
     });
 
@@ -135,8 +180,87 @@ app.post('/api/generate-lease', async (req, res) => {
   }
 });
 
-// Helper function: Fill Word template and convert to PDF
-async function fillTemplate(templatePath, data) {
+// PDF Form Filling
+async function fillPdfForm(pdfPath, data, fieldMappings = {}) {
+  try {
+    const pdfBytes = fs.readFileSync(pdfPath);
+    const pdfDoc = await PDFDocument.load(pdfBytes);
+    const form = pdfDoc.getForm();
+    const fields = form.getFields();
+    
+    console.log(`Filling PDF form: ${path.basename(pdfPath)} (${fields.length} fields)`);
+
+    for (const field of fields) {
+      const fieldName = field.getName();
+      const fieldType = field.constructor.name;
+      
+      let dataKey = fieldMappings[fieldName] || fieldName;
+      let value = null;
+      
+      if (typeof dataKey === 'string' && dataKey.startsWith('STATIC:')) {
+        value = dataKey.replace('STATIC:', '');
+      } else {
+        value = data[dataKey] || data[toCamelCase(dataKey)] || null;
+      }
+      
+      if (value !== null && value !== undefined && value !== '') {
+        try {
+          if (fieldType === 'PDFTextField') {
+            const textField = form.getTextField(fieldName);
+            textField.setText(String(value));
+          } else if (fieldType === 'PDFCheckBox') {
+            const checkBox = form.getCheckBox(fieldName);
+            if (value === true || value === 'true' || value === 'X' || value === 'Yes') {
+              checkBox.check();
+            } else {
+              checkBox.uncheck();
+            }
+          } else if (fieldType === 'PDFRadioGroup') {
+            const radioGroup = form.getRadioGroup(fieldName);
+            radioGroup.select(value);
+          } else if (fieldType === 'PDFDropdown') {
+            const dropdown = form.getDropdown(fieldName);
+            dropdown.select(value);
+          }
+          console.log(`  ✓ ${fieldName} = "${value}"`);
+        } catch (fieldError) {
+          console.warn(`  ✗ Could not fill ${fieldName}: ${fieldError.message}`);
+        }
+      }
+    }
+
+    form.flatten();
+    const filledPdfBytes = await pdfDoc.save();
+    return Buffer.from(filledPdfBytes);
+
+  } catch (error) {
+    console.error('Error filling PDF form:', error);
+    throw error;
+  }
+}
+
+// PDF Merging
+async function mergePdfs(pdfBuffers) {
+  try {
+    const mergedPdf = await PDFDocument.create();
+    
+    for (const pdfBuffer of pdfBuffers) {
+      const pdf = await PDFDocument.load(pdfBuffer);
+      const pages = await mergedPdf.copyPages(pdf, pdf.getPageIndices());
+      pages.forEach(page => mergedPdf.addPage(page));
+    }
+    
+    const mergedPdfBytes = await mergedPdf.save();
+    return Buffer.from(mergedPdfBytes);
+
+  } catch (error) {
+    console.error('Error merging PDFs:', error);
+    throw error;
+  }
+}
+
+// Word Template Filling
+async function fillWordTemplate(templatePath, data) {
   try {
     const content = fs.readFileSync(templatePath);
     const zip = new PizZip(content);
@@ -186,35 +310,55 @@ async function fillTemplate(templatePath, data) {
     return pdfBuffer;
 
   } catch (error) {
-    console.error('Error filling template:', error);
+    console.error('Error filling Word template:', error);
     throw error;
   }
 }
 
-// Endpoint to list available templates
+// Utility function
+function toCamelCase(str) {
+  return str
+    .replace(/(?:^\w|[A-Z]|\b\w)/g, (word, index) => 
+      index === 0 ? word.toLowerCase() : word.toUpperCase()
+    )
+    .replace(/\s+/g, '')
+    .replace(/[-_]+/g, '');
+}
+
+// List templates endpoint
 app.get('/api/templates', (req, res) => {
   try {
     const templatesDir = path.join(__dirname, 'templates');
-    const files = fs.readdirSync(templatesDir)
-      .filter(file => file.endsWith('.docx'))
-      .map(file => ({
-        name: file.replace('.docx', ''),
-        fileName: file
-      }));
+    const addendaDir = path.join(__dirname, 'templates', 'addenda');
+    const pdfFormsDir = path.join(__dirname, 'templates', 'pdf-forms');
+    const staticPdfsDir = path.join(__dirname, 'templates', 'static-pdfs');
+
+    const wordTemplates = fs.existsSync(templatesDir) 
+      ? fs.readdirSync(templatesDir).filter(f => f.endsWith('.docx')).map(f => ({ name: f.replace('.docx', ''), fileName: f, type: 'word' }))
+      : [];
+
+    const addenda = fs.existsSync(addendaDir)
+      ? fs.readdirSync(addendaDir).filter(f => f.endsWith('.docx')).map(f => ({ name: f.replace('.docx', ''), fileName: f, type: 'word-addendum' }))
+      : [];
+
+    const pdfForms = fs.existsSync(pdfFormsDir)
+      ? fs.readdirSync(pdfFormsDir).filter(f => f.endsWith('.pdf')).map(f => ({ name: f.replace('.pdf', ''), fileName: f, type: 'pdf-form' }))
+      : [];
+
+    const staticPdfs = fs.existsSync(staticPdfsDir)
+      ? fs.readdirSync(staticPdfsDir).filter(f => f.endsWith('.pdf')).map(f => ({ name: f.replace('.pdf', ''), fileName: f, type: 'static-pdf' }))
+      : [];
     
     res.json({
       success: true,
-      templates: files
+      templates: { wordTemplates, addenda, pdfForms, staticPdfs }
     });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 
-// Endpoint to list available addenda
+// List addenda endpoint
 app.get('/api/addenda', (req, res) => {
   try {
     const addendaDir = path.join(__dirname, 'templates', 'addenda');
@@ -225,20 +369,88 @@ app.get('/api/addenda', (req, res) => {
     
     const files = fs.readdirSync(addendaDir)
       .filter(file => file.endsWith('.docx'))
-      .map(file => ({
-        name: file.replace('.docx', ''),
-        fileName: file
-      }));
+      .map(file => ({ name: file.replace('.docx', ''), fileName: file }));
     
+    res.json({ success: true, addenda: files });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Inspect PDF form fields endpoint
+app.get('/api/pdf-fields/:formName', async (req, res) => {
+  try {
+    const { formName } = req.params;
+    const pdfPath = path.join(__dirname, 'templates', 'pdf-forms', `${formName}.pdf`);
+    
+    if (!fs.existsSync(pdfPath)) {
+      return res.status(404).json({
+        success: false,
+        error: `PDF form not found: ${formName}.pdf`
+      });
+    }
+
+    const pdfBytes = fs.readFileSync(pdfPath);
+    const pdfDoc = await PDFDocument.load(pdfBytes);
+    const form = pdfDoc.getForm();
+    const fields = form.getFields();
+
+    const fieldInfo = fields.map(field => {
+      const fieldType = field.constructor.name;
+      const info = { name: field.getName(), type: fieldType };
+
+      if (fieldType === 'PDFRadioGroup') {
+        try { info.options = form.getRadioGroup(field.getName()).getOptions(); } 
+        catch (e) { info.options = []; }
+      } else if (fieldType === 'PDFDropdown') {
+        try { info.options = form.getDropdown(field.getName()).getOptions(); } 
+        catch (e) { info.options = []; }
+      }
+
+      return info;
+    });
+
     res.json({
       success: true,
-      addenda: files
+      formName: formName,
+      fieldCount: fields.length,
+      fields: fieldInfo
     });
+
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Test PDF fill endpoint (returns PDF directly, no S3 upload)
+app.post('/api/test-pdf-fill', async (req, res) => {
+  try {
+    const { pdfForm, leaseData, fieldMappings = {} } = req.body;
+
+    if (!pdfForm || !leaseData) {
+      return res.status(400).json({
+        success: false,
+        error: 'Missing required fields: pdfForm and leaseData'
+      });
+    }
+
+    const pdfPath = path.join(__dirname, 'templates', 'pdf-forms', pdfForm);
+    
+    if (!fs.existsSync(pdfPath)) {
+      return res.status(404).json({
+        success: false,
+        error: `PDF form not found: ${pdfForm}`
+      });
+    }
+
+    const filledPdf = await fillPdfForm(pdfPath, leaseData, fieldMappings);
+
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `inline; filename="test-${pdfForm}"`);
+    res.send(filledPdf);
+
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 
@@ -247,4 +459,6 @@ app.listen(PORT, () => {
   console.log(`🚀 Lease Generation API running on port ${PORT}`);
   console.log(`📍 Health check: http://localhost:${PORT}/`);
   console.log(`📄 Generate endpoint: http://localhost:${PORT}/api/generate-lease`);
+  console.log(`📋 Templates: http://localhost:${PORT}/api/templates`);
+  console.log(`🔍 PDF Fields: http://localhost:${PORT}/api/pdf-fields/{formName}`);
 });
