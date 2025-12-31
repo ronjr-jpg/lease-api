@@ -97,7 +97,7 @@ app.post('/api/generate-lease', async (req, res) => {
 
     // 3. Process PDF forms (fill and flatten)
     for (const pdfForm of pdfForms) {
-      const templateFile = typeof pdfForm === 'string' ? pdfForm : pdfForm.template;
+      const pdfPath = path.join(__dirname, 'templates', templateFile);
       const fieldMappings = typeof pdfForm === 'object' ? pdfForm.fieldMappings : {};
       
       const pdfPath = path.join(__dirname, 'templates', 'pdf-forms', templateFile);
@@ -330,7 +330,7 @@ app.get('/api/templates', (req, res) => {
   try {
     const templatesDir = path.join(__dirname, 'templates');
     const addendaDir = path.join(__dirname, 'templates', 'addenda');
-    const pdfFormsDir = path.join(__dirname, 'templates', 'pdf-forms');
+    const pdfFormsDir = path.join(__dirname, 'templates');
     const staticPdfsDir = path.join(__dirname, 'templates', 'static-pdfs');
 
     const wordTemplates = fs.existsSync(templatesDir) 
@@ -381,7 +381,7 @@ app.get('/api/addenda', (req, res) => {
 app.get('/api/pdf-fields/:formName', async (req, res) => {
   try {
     const { formName } = req.params;
-    const pdfPath = path.join(__dirname, 'templates', 'pdf-forms', `${formName}.pdf`);
+    const pdfPath = path.join(__dirname, 'templates', `${formName}.pdf`);
     
     if (!fs.existsSync(pdfPath)) {
       return res.status(404).json({
@@ -434,7 +434,7 @@ app.post('/api/test-pdf-fill', async (req, res) => {
       });
     }
 
-    const pdfPath = path.join(__dirname, 'templates', 'pdf-forms', pdfForm);
+    const pdfPath = path.join(__dirname, 'templates', pdfForm);
     
     if (!fs.existsSync(pdfPath)) {
       return res.status(404).json({
