@@ -97,10 +97,10 @@ app.post('/api/generate-lease', async (req, res) => {
 
     // 3. Process PDF forms (fill and flatten)
     for (const pdfForm of pdfForms) {
-      const pdfPath = path.join(__dirname, 'templates', templateFile);
+      const templateFile = typeof pdfForm === 'string' ? pdfForm : pdfForm.template;
       const fieldMappings = typeof pdfForm === 'object' ? pdfForm.fieldMappings : {};
       
-      const pdfPath = path.join(__dirname, 'templates', 'pdf-forms', templateFile);
+      const pdfPath = path.join(__dirname, 'templates', templateFile);
       
       if (fs.existsSync(pdfPath)) {
         const filledPdf = await fillPdfForm(pdfPath, leaseData, fieldMappings);
@@ -112,7 +112,7 @@ app.post('/api/generate-lease', async (req, res) => {
 
     // 4. Process static PDFs
     for (const staticPdf of staticPdfs) {
-      const pdfPath = path.join(__dirname, 'templates', 'static-pdfs', staticPdf);
+      const pdfPath = path.join(__dirname, 'templates', staticPdf);
       
       if (fs.existsSync(pdfPath)) {
         const pdfBuffer = fs.readFileSync(pdfPath);
@@ -330,8 +330,6 @@ app.get('/api/templates', (req, res) => {
   try {
     const templatesDir = path.join(__dirname, 'templates');
     const addendaDir = path.join(__dirname, 'templates', 'addenda');
-    const pdfFormsDir = path.join(__dirname, 'templates');
-    const staticPdfsDir = path.join(__dirname, 'templates', 'static-pdfs');
 
     const wordTemplates = fs.existsSync(templatesDir) 
       ? fs.readdirSync(templatesDir).filter(f => f.endsWith('.docx')).map(f => ({ name: f.replace('.docx', ''), fileName: f, type: 'word' }))
@@ -341,17 +339,13 @@ app.get('/api/templates', (req, res) => {
       ? fs.readdirSync(addendaDir).filter(f => f.endsWith('.docx')).map(f => ({ name: f.replace('.docx', ''), fileName: f, type: 'word-addendum' }))
       : [];
 
-    const pdfForms = fs.existsSync(pdfFormsDir)
-      ? fs.readdirSync(pdfFormsDir).filter(f => f.endsWith('.pdf')).map(f => ({ name: f.replace('.pdf', ''), fileName: f, type: 'pdf-form' }))
-      : [];
-
-    const staticPdfs = fs.existsSync(staticPdfsDir)
-      ? fs.readdirSync(staticPdfsDir).filter(f => f.endsWith('.pdf')).map(f => ({ name: f.replace('.pdf', ''), fileName: f, type: 'static-pdf' }))
+    const pdfForms = fs.existsSync(templatesDir)
+      ? fs.readdirSync(templatesDir).filter(f => f.endsWith('.pdf')).map(f => ({ name: f.replace('.pdf', ''), fileName: f, type: 'pdf-form' }))
       : [];
     
     res.json({
       success: true,
-      templates: { wordTemplates, addenda, pdfForms, staticPdfs }
+      templates: { wordTemplates, addenda, pdfForms }
     });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
