@@ -34,6 +34,18 @@ const s3 = new AWS.S3(s3Config);
 // Templates directory (flat structure - no subfolders)
 const TEMPLATES_DIR = path.join(__dirname, 'templates');
 
+// =============================================================================
+// DOCUMENT MAPPING: Boolean flags → filenames
+// =============================================================================
+const ADDENDUM_MAP = {
+  includeLeadPaint: 'LEM_NJ_Lead_Paint_Addendum_2025-12-29.docx',
+  includePetAddendum: 'LEM_Pet_2025-09.docx',
+  includeCIS: 'NJAR_CIS_2025-15-12.pdf'
+  // Add more mappings as needed:
+  // includeMoveIn: 'LEM_Move_In_Checklist.docx',
+  // includeUtilities: 'LEM_Utilities_Addendum.docx',
+};
+
 // Health check endpoint
 app.get('/', (req, res) => {
   res.json({ 
@@ -48,12 +60,48 @@ app.get('/', (req, res) => {
 // =============================================================================
 app.post('/api/generate-lease', async (req, res) => {
   try {
-    const { documents = [], leaseData } = req.body;
+    const { 
+      // Option 1: Direct documents array (for Postman/testing)
+      documents,
+      // Option 2: Glide-friendly booleans
+      selectedLease,
+      includeLeadPaint,
+      includePetAddendum,
+      includeCIS,
+      // Common
+      leaseData 
+    } = req.body;
+
+    // Build documents array - either from direct array or from booleans
+    let docsToProcess = [];
+    
+    if (documents && documents.length > 0) {
+      // Direct array mode (Postman, testing, advanced use)
+      docsToProcess = [...documents];
+      console.log('📋 Using direct documents array');
+    } else if (selectedLease) {
+      // Glide-friendly mode: build array from booleans
+      console.log('📋 Building documents from Glide booleans');
+      
+      // Start with the selected base lease
+      docsToProcess.push(selectedLease);
+      
+      // Add addenda based on boolean flags
+      if (includeLeadPaint && ADDENDUM_MAP.includeLeadPaint) {
+        docsToProcess.push(ADDENDUM_MAP.includeLeadPaint);
+      }
+      if (includePetAddendum && ADDENDUM_MAP.includePetAddendum) {
+        docsToProcess.push(ADDENDUM_MAP.includePetAddendum);
+      }
+      if (includeCIS && ADDENDUM_MAP.includeCIS) {
+        docsToProcess.push(ADDENDUM_MAP.includeCIS);
+      }
+    }
 
     console.log('Generating lease package:', {
       leaseId: leaseData?.leaseId,
-      documentCount: documents.length,
-      documents: documents
+      documentCount: docsToProcess.length,
+      documents: docsToProcess
     });
 
     // Validation
@@ -64,10 +112,10 @@ app.post('/api/generate-lease', async (req, res) => {
       });
     }
 
-    if (!documents || documents.length === 0) {
+    if (!docsToProcess || docsToProcess.length === 0) {
       return res.status(400).json({
         success: false,
-        error: 'Missing required field: documents (array of filenames)'
+        error: 'No documents specified. Provide either "documents" array or "selectedLease" with boolean flags.'
       });
     }
 
@@ -76,7 +124,7 @@ app.post('/api/generate-lease', async (req, res) => {
     const warnings = [];
 
     // Process each document in order
-    for (const doc of documents) {
+    for (const doc of docsToProcess) {
       const fileName = typeof doc === 'string' ? doc : doc.fileName;
       const filePath = path.join(TEMPLATES_DIR, fileName);
 
@@ -162,7 +210,7 @@ app.post('/api/generate-lease', async (req, res) => {
       generatedAt: new Date().toISOString(),
       metadata: {
         leaseId: leaseData.leaseId,
-        documentsRequested: documents.length,
+        documentsRequested: docsToProcess.length,
         documentsProcessed: processedDocs.length,
         documents: processedDocs
       },
