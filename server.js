@@ -46,6 +46,16 @@ const ADDENDUM_MAP = {
   // includeUtilities: 'LEM_Utilities_Addendum.docx',
 };
 
+// Control fields that should NOT be passed to templates
+const CONTROL_FIELDS = [
+  'documents',
+  'selectedLease', 
+  'includeLeadPaint', 
+  'includePetAddendum', 
+  'includeCIS',
+  'leaseData'  // For backwards compatibility with nested format
+];
+
 // Health check endpoint
 app.get('/', (req, res) => {
   res.json({ 
@@ -60,17 +70,33 @@ app.get('/', (req, res) => {
 // =============================================================================
 app.post('/api/generate-lease', async (req, res) => {
   try {
+    // Extract control fields
     const { 
-      // Option 1: Direct documents array (for Postman/testing)
       documents,
-      // Option 2: Glide-friendly booleans
       selectedLease,
       includeLeadPaint,
       includePetAddendum,
       includeCIS,
-      // Common
-      leaseData 
+      leaseData: nestedLeaseData  // For backwards compatibility
     } = req.body;
+
+    // Build leaseData: either from nested object OR from flat fields
+    let leaseData;
+    
+    if (nestedLeaseData && typeof nestedLeaseData === 'object') {
+      // Backwards compatible: nested leaseData object provided
+      console.log('📋 Using nested leaseData format (backwards compatible)');
+      leaseData = nestedLeaseData;
+    } else {
+      // New flat format: everything except control fields IS the lease data
+      console.log('📋 Using flat payload format (Glide-friendly)');
+      leaseData = {};
+      for (const [key, value] of Object.entries(req.body)) {
+        if (!CONTROL_FIELDS.includes(key)) {
+          leaseData[key] = value;
+        }
+      }
+    }
 
     // Build documents array - either from direct array or from booleans
     let docsToProcess = [];
@@ -81,7 +107,7 @@ app.post('/api/generate-lease', async (req, res) => {
       console.log('📋 Using direct documents array');
     } else if (selectedLease) {
       // Glide-friendly mode: build array from booleans
-      console.log('📋 Building documents from Glide booleans');
+      console.log('📋 Building documents from boolean flags');
       
       // Start with the selected base lease
       docsToProcess.push(selectedLease);
@@ -101,14 +127,15 @@ app.post('/api/generate-lease', async (req, res) => {
     console.log('Generating lease package:', {
       leaseId: leaseData?.leaseId,
       documentCount: docsToProcess.length,
-      documents: docsToProcess
+      documents: docsToProcess,
+      fieldCount: Object.keys(leaseData).length
     });
 
     // Validation
-    if (!leaseData) {
+    if (!leaseData || Object.keys(leaseData).length === 0) {
       return res.status(400).json({
         success: false,
-        error: 'Missing required field: leaseData'
+        error: 'Missing lease data fields. Provide fields either nested in "leaseData" object or flat at root level.'
       });
     }
 
