@@ -35,26 +35,104 @@ const s3 = new AWS.S3(s3Config);
 const TEMPLATES_DIR = path.join(__dirname, 'templates');
 
 // =============================================================================
+// LEASE NAME MAPPING: Display names → actual filenames
+// =============================================================================
+const LEASE_NAME_MAP = {
+  // LEM Leases
+  'LEM NJ Lease': 'LEM_NJ_Residential_Lease_2025-12-29.docx',
+  'LEM Spice Lofts': 'LEM_Spice_Lofts_Lease_2025-12-29.docx',
+  // NJAR Leases
+  'NJAR Lease': 'NJAR_Standard_Lease.pdf',
+  'NJAR Standard Lease': 'NJAR_Standard_Lease.pdf'
+};
+
+// =============================================================================
 // DOCUMENT MAPPING: Boolean flags → filenames
 // =============================================================================
 const ADDENDUM_MAP = {
   includeLeadPaint: 'LEM_NJ_Lead_Paint_Addendum_2025-12-29.docx',
   includePetAddendum: 'LEM_Pet_2025-09.docx',
-  includeCIS: 'NJAR_CIS_2025-15-12.pdf'
-  // Add more mappings as needed:
-  // includeMoveIn: 'LEM_Move_In_Checklist.docx',
-  // includeUtilities: 'LEM_Utilities_Addendum.docx',
+  includeCIS: 'NJAR_CIS_2025-15-12.pdf',
+  lemPet: 'LEM_Pet_2025-09.docx',      // Glide name
+  njarCIS: 'NJAR_CIS_2025-15-12.pdf',  // Glide name
+  njarLead: 'LEM_NJ_Lead_Paint_Addendum_2025-12-29.docx'  // Glide name
+};
+
+// =============================================================================
+// FIELD MAPPING: Glide names → Template names
+// =============================================================================
+const FIELD_MAP = {
+  // Glide name: Template name
+  'baseLease': 'selectedLease',
+  'securityDeposit': 'security',
+  'leaseCommencement': 'commencement',
+  'leaseTermination': 'endDate',
+  'termMonths': 'term',
+  'leaseEntity': 'landlordEntity',
+  'propCity': 'propertyCity',
+  'propZip': 'propertyZip',
+  'propStreet1': 'propertyAddress',
+  'unit': 'propertyUnit',
+  // Pet fields - spaces to camelCase
+  'Pet 1 Name': 'pet1Name',
+  'Pet 1 Type': 'pet1Type',
+  'Pet 1 Age': 'pet1Age',
+  'Pet 1 Weight': 'pet1Weight',
+  'Pet 1 Breed': 'pet1Breed',
+  'Pet 2 Name': 'pet2Name',
+  'Pet 2 Type': 'pet2Type',
+  'Pet 2 Age': 'pet2Age',
+  'Pet 2 Weight': 'pet2Weight',
+  'Pet 2 Breed': 'pet2Breed',
+  'Pet 3 Name': 'pet3Name',
+  'Pet 3 Type': 'pet3Type',
+  'Pet 3 Age': 'pet3Age',
+  'Pet 3 Weight': 'pet3Weight',
+  'Pet 3 Breed': 'pet3Breed',
+  'Pet 4 Name': 'pet4Name',
+  'Pet 4 Type': 'pet4Type',
+  'Pet 4 Age': 'pet4Age',
+  'Pet 4 Weight': 'pet4Weight',
+  'Pet 4 Breed': 'pet4Breed'
 };
 
 // Control fields that should NOT be passed to templates
 const CONTROL_FIELDS = [
   'documents',
-  'selectedLease', 
+  'selectedLease',
+  'baseLease',
   'includeLeadPaint', 
   'includePetAddendum', 
   'includeCIS',
+  'lemPet',
+  'njarCIS',
+  'njarLead',
   'leaseData'  // For backwards compatibility with nested format
 ];
+
+// =============================================================================
+// Helper: Apply field mapping to lease data
+// =============================================================================
+function applyFieldMapping(data) {
+  const mapped = {};
+  for (const [key, value] of Object.entries(data)) {
+    const newKey = FIELD_MAP[key] || key;  // Use mapped name or original
+    mapped[newKey] = value;
+  }
+  return mapped;
+}
+
+// =============================================================================
+// Helper: Resolve lease name to filename
+// =============================================================================
+function resolveLeaseFilename(leaseName) {
+  // If it's already a filename (has extension), return as-is
+  if (leaseName && (leaseName.endsWith('.docx') || leaseName.endsWith('.pdf'))) {
+    return leaseName;
+  }
+  // Otherwise, look up in map
+  return LEASE_NAME_MAP[leaseName] || leaseName;
+}
 
 // Health check endpoint
 app.get('/', (req, res) => {
@@ -86,17 +164,22 @@ app.post('/api/generate-lease', async (req, res) => {
     if (nestedLeaseData && typeof nestedLeaseData === 'object') {
       // Backwards compatible: nested leaseData object provided
       console.log('📋 Using nested leaseData format (backwards compatible)');
-      leaseData = nestedLeaseData;
+      leaseData = applyFieldMapping(nestedLeaseData);
     } else {
       // New flat format: everything except control fields IS the lease data
       console.log('📋 Using flat payload format (Glide-friendly)');
-      leaseData = {};
+      let rawData = {};
       for (const [key, value] of Object.entries(req.body)) {
         if (!CONTROL_FIELDS.includes(key)) {
-          leaseData[key] = value;
+          rawData[key] = value;
         }
       }
+      // Apply field name mapping (Glide names → template names)
+      leaseData = applyFieldMapping(rawData);
     }
+
+    // Get base lease from either field name (support both)
+    const baseLeaseName = req.body.selectedLease || req.body.baseLease;
 
     // Build documents array - either from direct array or from booleans
     let docsToProcess = [];
@@ -105,21 +188,27 @@ app.post('/api/generate-lease', async (req, res) => {
       // Direct array mode (Postman, testing, advanced use)
       docsToProcess = [...documents];
       console.log('📋 Using direct documents array');
-    } else if (selectedLease) {
+    } else if (baseLeaseName) {
       // Glide-friendly mode: build array from booleans
       console.log('📋 Building documents from boolean flags');
       
-      // Start with the selected base lease
-      docsToProcess.push(selectedLease);
+      // Resolve lease name to filename (e.g., "LEM NJ Lease" → "LEM_NJ_Residential_Lease_2025-12-29.docx")
+      const resolvedLease = resolveLeaseFilename(baseLeaseName);
+      console.log(`📋 Resolved lease: "${baseLeaseName}" → "${resolvedLease}"`);
+      docsToProcess.push(resolvedLease);
       
-      // Add addenda based on boolean flags
-      if (includeLeadPaint && ADDENDUM_MAP.includeLeadPaint) {
+      // Add addenda based on boolean flags (support both naming conventions)
+      const addLeadPaint = req.body.includeLeadPaint || req.body.njarLead;
+      const addPet = req.body.includePetAddendum || req.body.lemPet;
+      const addCIS = req.body.includeCIS || req.body.njarCIS;
+      
+      if (addLeadPaint && ADDENDUM_MAP.includeLeadPaint) {
         docsToProcess.push(ADDENDUM_MAP.includeLeadPaint);
       }
-      if (includePetAddendum && ADDENDUM_MAP.includePetAddendum) {
+      if (addPet && ADDENDUM_MAP.includePetAddendum) {
         docsToProcess.push(ADDENDUM_MAP.includePetAddendum);
       }
-      if (includeCIS && ADDENDUM_MAP.includeCIS) {
+      if (addCIS && ADDENDUM_MAP.includeCIS) {
         docsToProcess.push(ADDENDUM_MAP.includeCIS);
       }
     }
