@@ -73,6 +73,17 @@ const FIELD_MAP = {
   'propZip': 'propertyZip',
   'propStreet1': 'propertyAddress',
   'unit': 'propertyUnit',
+  
+  // CIS PDF text fields (Glide name → PDF field name)
+  'landlordEntity': 'Landlord',
+  'tenant1Name': 'Tenant 1',
+  'tenant2Name': 'Tenant 2',
+  'tenant3Name': 'Tenant 3',
+  'tenant4Name': 'Tenant 4',
+  'brokerageName': 'Brokerage Name',
+  'agentName': 'agentName',
+  'leaseDate': 'leaseDate',
+  
   // Pet fields - spaces to camelCase
   'Pet 1 Name': 'pet1Name',
   'Pet 1 Type': 'pet1Type',
@@ -120,6 +131,25 @@ function applyFieldMapping(data) {
     mapped[newKey] = value;
   }
   return mapped;
+}
+
+// =============================================================================
+// Helper: Convert CIS boolean flags to radio group value
+// =============================================================================
+function applyCISRadioGroupMapping(data) {
+  // Convert individual boolean flags to single brokerRelationship radio value
+  if (data.landlordAgent === true || data.landlordAgent === 'true') {
+    data.brokerRelationship = 'sellersAgent';
+  } else if (data.tenantAgent === true || data.tenantAgent === 'true') {
+    data.brokerRelationship = 'buyersAgent';
+  } else if (data.sellerAndDD === true || data.sellerAndDD === 'true') {
+    data.brokerRelationship = 'sellersDual';
+  } else if (data.buyerAndDD === true || data.buyerAndDD === 'true') {
+    data.brokerRelationship = 'buyersDual';
+  } else if (data.transactionBroker === true || data.transactionBroker === 'true') {
+    data.brokerRelationship = 'transactionBroker';
+  }
+  return data;
 }
 
 // =============================================================================
@@ -177,6 +207,9 @@ app.post('/api/generate-lease', async (req, res) => {
       // Apply field name mapping (Glide names → template names)
       leaseData = applyFieldMapping(rawData);
     }
+
+    // Apply CIS radio group mapping (convert booleans to single radio value)
+    leaseData = applyCISRadioGroupMapping(leaseData);
 
     // Get base lease from either field name (support both)
     const baseLeaseName = req.body.selectedLease || req.body.baseLease;
@@ -396,11 +429,14 @@ async function fillPdfForm(pdfDoc, form, fields, data) {
           } else if (fieldType === 'PDFRadioGroup') {
             const radioGroup = form.getRadioGroup(fieldName);
             radioGroup.select(String(value));
+            console.log(`    ✓ RadioGroup ${fieldName} = "${value}"`);
           } else if (fieldType === 'PDFDropdown') {
             const dropdown = form.getDropdown(fieldName);
             dropdown.select(String(value));
           }
-          console.log(`    ✓ ${fieldName} = "${value}"`);
+          if (fieldType !== 'PDFRadioGroup') {
+            console.log(`    ✓ ${fieldName} = "${value}"`);
+          }
         } catch (fieldError) {
           console.warn(`    ✗ Could not fill ${fieldName}: ${fieldError.message}`);
         }
