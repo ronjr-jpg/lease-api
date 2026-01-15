@@ -68,14 +68,12 @@ const FIELD_MAP = {
   'leaseCommencement': 'commencement',
   'leaseTermination': 'endDate',
   'termMonths': 'term',
-  'leaseEntity': 'landlordEntity',
   'propCity': 'propertyCity',
   'propZip': 'propertyZip',
   'propStreet1': 'propertyAddress',
   'unit': 'propertyUnit',
   
   // CIS PDF text fields (Glide name → PDF field name)
-  'landlordEntity': 'Landlord',
   'tenant1Name': 'Tenant 1',
   'tenant2Name': 'Tenant 2',
   'tenant3Name': 'Tenant 3',
