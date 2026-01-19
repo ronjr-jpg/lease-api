@@ -62,18 +62,37 @@ const ADDENDUM_MAP = {
 // FIELD MAPPING: Glide names → Template names
 // =============================================================================
 const FIELD_MAP = {
-  // Glide name: Template name
+  // ----- CORE / LEASE SELECTION -----
   'baseLease': 'selectedLease',
-  'securityDeposit': 'security',
+  
+  // ----- DATES & TERMS -----
   'leaseCommencement': 'commencement',
   'leaseTermination': 'endDate',
   'termMonths': 'term',
-  'propCity': 'propertyCity',
-  'propZip': 'propertyZip',
+  
+  // ----- FINANCIAL -----
+  'securityDeposit': 'security',
+  'lostKeyFee': 'lostFee',
+  
+  // ----- PROPERTY -----
   'propStreet1': 'propertyAddress',
   'unit': 'propertyUnit',
+  'propCity': 'propertyCity',
+  'propState': 'propertyState',
+  'propZip': 'propertyZip',
   
-  // CIS PDF text fields (Glide name → PDF field name)
+  // ----- LANDLORD -----
+  'leaseEntity': 'landlordEntity',
+  'landlordMailStreet1': 'landlordStreet1',
+  'landlordMailStreet2': 'landlordStreet2',
+  'landlordMailCity': 'landlordCity',
+  'landlordMailState': 'landlordState',
+  'landlordMailZip': 'landlordZip',
+  
+  // ----- PETS -----
+  'petnumber': 'petNumber',
+  
+  // ----- CIS PDF text fields (Glide name → PDF field name) -----
   'tenant1Name': 'Tenant 1',
   'tenant2Name': 'Tenant 2',
   'tenant3Name': 'Tenant 3',
@@ -82,7 +101,7 @@ const FIELD_MAP = {
   'agentName': 'agentName',
   'leaseDate': 'leaseDate',
   
-  // Pet fields - spaces to camelCase
+  // ----- Pet fields - spaces to camelCase (legacy support) -----
   'Pet 1 Name': 'pet1Name',
   'Pet 1 Type': 'pet1Type',
   'Pet 1 Age': 'pet1Age',
