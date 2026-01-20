@@ -81,14 +81,6 @@ const FIELD_MAP = {
   'propState': 'propertyState',
   'propZip': 'propertyZip',
   
-  // ----- LANDLORD -----
-  'leaseEntity': 'landlordEntity',
-  'landlordMailStreet1': 'landlordStreet1',
-  'landlordMailStreet2': 'landlordStreet2',
-  'landlordMailCity': 'landlordCity',
-  'landlordMailState': 'landlordState',
-  'landlordMailZip': 'landlordZip',
-  
   // ----- PETS -----
   'petnumber': 'petNumber',
   
