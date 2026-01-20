@@ -85,10 +85,6 @@ const FIELD_MAP = {
   'petnumber': 'petNumber',
   
   // ----- CIS PDF text fields (Glide name → PDF field name) -----
-  'tenant1Name': 'Tenant 1',
-  'tenant2Name': 'Tenant 2',
-  'tenant3Name': 'Tenant 3',
-  'tenant4Name': 'Tenant 4',
   'brokerageName': 'Brokerage Name',
   'agentName': 'agentName',
   'leaseDate': 'leaseDate',
