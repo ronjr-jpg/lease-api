@@ -8,6 +8,8 @@ const fs = require('fs');
 const path = require('path');
 const { execSync } = require('child_process');
 const { PDFDocument } = require('pdf-lib');
+const docusign = require('docusign-esign');
+const axios = require('axios');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -33,6 +35,18 @@ const s3 = new AWS.S3(s3Config);
 
 // Templates directory (flat structure - no subfolders)
 const TEMPLATES_DIR = path.join(__dirname, 'templates');
+
+// =============================================================================
+// DOCUSIGN CONFIGURATION
+// =============================================================================
+const DOCUSIGN_CONFIG = {
+  integrationKey: process.env.DOCUSIGN_INTEGRATION_KEY,
+  userId: process.env.DOCUSIGN_USER_ID,
+  accountId: process.env.DOCUSIGN_ACCOUNT_ID,
+  basePath: process.env.DOCUSIGN_BASE_PATH || 'https://demo.docusign.net/restapi',
+  oAuthBasePath: process.env.DOCUSIGN_OAUTH_BASE_PATH || 'account-d.docusign.com',
+  privateKey: process.env.DOCUSIGN_PRIVATE_KEY
+};
 
 // =============================================================================
 // LEASE NAME MAPPING: Display names → actual filenames
@@ -167,6 +181,146 @@ function resolveLeaseFilename(leaseName) {
   }
   // Otherwise, look up in map
   return LEASE_NAME_MAP[leaseName] || leaseName;
+}
+
+// =============================================================================
+// DOCUSIGN AUTHENTICATION (JWT)
+// =============================================================================
+async function getDocuSignAccessToken() {
+  const jwtLifeSec = 3600;
+  const scopes = ['signature', 'impersonation'];
+
+  const apiClient = new docusign.ApiClient();
+  apiClient.setOAuthBasePath(DOCUSIGN_CONFIG.oAuthBasePath);
+
+  // Handle private key - might have literal \n or actual newlines
+  let privateKey = DOCUSIGN_CONFIG.privateKey;
+  if (privateKey && privateKey.includes('\\n')) {
+    privateKey = privateKey.replace(/\\n/g, '\n');
+  }
+
+  try {
+    const results = await apiClient.requestJWTUserToken(
+      DOCUSIGN_CONFIG.integrationKey,
+      DOCUSIGN_CONFIG.userId,
+      scopes,
+      privateKey,
+      jwtLifeSec
+    );
+    return results.body.access_token;
+  } catch (error) {
+    console.error('DocuSign JWT Auth Error:', error.message);
+    if (error.response) {
+      console.error('Response:', error.response.body);
+    }
+    throw error;
+  }
+}
+
+// =============================================================================
+// DOCUSIGN: Build Signers Array with Dynamic Recipients
+// =============================================================================
+function buildSigners(data) {
+  const signers = [];
+  let recipientId = 1;
+
+  // Determine routing order based on whether agent is present
+  const hasAgent = data.agentName && data.agentEmail;
+  const agentOrder = 1;
+  const tenantOrder = hasAgent ? 2 : 1;
+  const landlordOrder = hasAgent ? 3 : 2;
+
+  // Agent (optional - signs first if present)
+  if (hasAgent) {
+    signers.push({
+      email: data.agentEmail,
+      name: data.agentName,
+      recipientId: String(recipientId++),
+      routingOrder: String(agentOrder),
+      tabs: {
+        signHereTabs: [{ anchorString: '[[Agent_Signature]]', anchorUnits: 'pixels', anchorXOffset: '0', anchorYOffset: '-5', anchorIgnoreIfNotPresent: 'true' }],
+        dateSignedTabs: [{ anchorString: '[[Agent_Date]]', anchorUnits: 'pixels', anchorXOffset: '0', anchorYOffset: '-5', anchorIgnoreIfNotPresent: 'true' }],
+        initialHereTabs: [{ anchorString: '[[Agent_Initial]]', anchorUnits: 'pixels', anchorXOffset: '0', anchorYOffset: '-5', anchorIgnoreIfNotPresent: 'true' }]
+      }
+    });
+  }
+
+  // Tenant 1 (required)
+  if (data.tenant1Name && data.tenant1Email) {
+    signers.push({
+      email: data.tenant1Email,
+      name: data.tenant1Name,
+      recipientId: String(recipientId++),
+      routingOrder: String(tenantOrder),
+      tabs: {
+        signHereTabs: [{ anchorString: '[[Tenant1_Signature]]', anchorUnits: 'pixels', anchorXOffset: '0', anchorYOffset: '-5', anchorIgnoreIfNotPresent: 'false' }],
+        dateSignedTabs: [{ anchorString: '[[Tenant1_Date]]', anchorUnits: 'pixels', anchorXOffset: '0', anchorYOffset: '-5', anchorIgnoreIfNotPresent: 'true' }],
+        initialHereTabs: [{ anchorString: '[[Tenant1_Initial]]', anchorUnits: 'pixels', anchorXOffset: '0', anchorYOffset: '-5', anchorIgnoreIfNotPresent: 'true' }]
+      }
+    });
+  }
+
+  // Tenant 2 (optional)
+  if (data.tenant2Name && data.tenant2Email) {
+    signers.push({
+      email: data.tenant2Email,
+      name: data.tenant2Name,
+      recipientId: String(recipientId++),
+      routingOrder: String(tenantOrder),
+      tabs: {
+        signHereTabs: [{ anchorString: '[[Tenant2_Signature]]', anchorUnits: 'pixels', anchorXOffset: '0', anchorYOffset: '-5', anchorIgnoreIfNotPresent: 'true' }],
+        dateSignedTabs: [{ anchorString: '[[Tenant2_Date]]', anchorUnits: 'pixels', anchorXOffset: '0', anchorYOffset: '-5', anchorIgnoreIfNotPresent: 'true' }],
+        initialHereTabs: [{ anchorString: '[[Tenant2_Initial]]', anchorUnits: 'pixels', anchorXOffset: '0', anchorYOffset: '-5', anchorIgnoreIfNotPresent: 'true' }]
+      }
+    });
+  }
+
+  // Tenant 3 (optional)
+  if (data.tenant3Name && data.tenant3Email) {
+    signers.push({
+      email: data.tenant3Email,
+      name: data.tenant3Name,
+      recipientId: String(recipientId++),
+      routingOrder: String(tenantOrder),
+      tabs: {
+        signHereTabs: [{ anchorString: '[[Tenant3_Signature]]', anchorUnits: 'pixels', anchorXOffset: '0', anchorYOffset: '-5', anchorIgnoreIfNotPresent: 'true' }],
+        dateSignedTabs: [{ anchorString: '[[Tenant3_Date]]', anchorUnits: 'pixels', anchorXOffset: '0', anchorYOffset: '-5', anchorIgnoreIfNotPresent: 'true' }],
+        initialHereTabs: [{ anchorString: '[[Tenant3_Initial]]', anchorUnits: 'pixels', anchorXOffset: '0', anchorYOffset: '-5', anchorIgnoreIfNotPresent: 'true' }]
+      }
+    });
+  }
+
+  // Tenant 4 (optional)
+  if (data.tenant4Name && data.tenant4Email) {
+    signers.push({
+      email: data.tenant4Email,
+      name: data.tenant4Name,
+      recipientId: String(recipientId++),
+      routingOrder: String(tenantOrder),
+      tabs: {
+        signHereTabs: [{ anchorString: '[[Tenant4_Signature]]', anchorUnits: 'pixels', anchorXOffset: '0', anchorYOffset: '-5', anchorIgnoreIfNotPresent: 'true' }],
+        dateSignedTabs: [{ anchorString: '[[Tenant4_Date]]', anchorUnits: 'pixels', anchorXOffset: '0', anchorYOffset: '-5', anchorIgnoreIfNotPresent: 'true' }],
+        initialHereTabs: [{ anchorString: '[[Tenant4_Initial]]', anchorUnits: 'pixels', anchorXOffset: '0', anchorYOffset: '-5', anchorIgnoreIfNotPresent: 'true' }]
+      }
+    });
+  }
+
+  // Landlord (required - signs last)
+  if (data.landlordSignor && data.landlordEmail) {
+    signers.push({
+      email: data.landlordEmail,
+      name: data.landlordSignor,
+      recipientId: String(recipientId++),
+      routingOrder: String(landlordOrder),
+      tabs: {
+        signHereTabs: [{ anchorString: '[[Landlord_Signature]]', anchorUnits: 'pixels', anchorXOffset: '0', anchorYOffset: '-5', anchorIgnoreIfNotPresent: 'false' }],
+        dateSignedTabs: [{ anchorString: '[[Landlord_Date]]', anchorUnits: 'pixels', anchorXOffset: '0', anchorYOffset: '-5', anchorIgnoreIfNotPresent: 'true' }],
+        initialHereTabs: [{ anchorString: '[[Landlord_Initial]]', anchorUnits: 'pixels', anchorXOffset: '0', anchorYOffset: '-5', anchorIgnoreIfNotPresent: 'true' }]
+      }
+    });
+  }
+
+  return signers;
 }
 
 // Health check endpoint
@@ -377,6 +531,149 @@ app.post('/api/generate-lease', async (req, res) => {
       success: false,
       error: error.message,
       stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+    });
+  }
+});
+
+// =============================================================================
+// ENDPOINT: Send to DocuSign
+// =============================================================================
+app.post('/api/send-to-docusign', async (req, res) => {
+  console.log('\n========== DOCUSIGN SEND REQUEST ==========');
+  console.log('Timestamp:', new Date().toISOString());
+
+  try {
+    const { pdfUrl, emailSubject, ...signerData } = req.body;
+
+    // Validate required fields
+    if (!pdfUrl) {
+      return res.status(400).json({ success: false, error: 'Missing required field: pdfUrl' });
+    }
+    if (!signerData.tenant1Name || !signerData.tenant1Email) {
+      return res.status(400).json({ success: false, error: 'Missing required fields: tenant1Name, tenant1Email' });
+    }
+    if (!signerData.landlordSignor || !signerData.landlordEmail) {
+      return res.status(400).json({ success: false, error: 'Missing required fields: landlordSignor, landlordEmail' });
+    }
+
+    console.log('PDF URL:', pdfUrl);
+    console.log('Signers:', JSON.stringify(signerData, null, 2));
+
+    // Step 1: Get access token
+    console.log('\n1. Authenticating with DocuSign...');
+    const accessToken = await getDocuSignAccessToken();
+    console.log('   ✓ Authentication successful');
+
+    // Step 2: Download the PDF
+    console.log('\n2. Downloading PDF from R2...');
+    const pdfResponse = await axios.get(pdfUrl, { responseType: 'arraybuffer' });
+    const pdfBase64 = Buffer.from(pdfResponse.data).toString('base64');
+    console.log('   ✓ PDF downloaded, size:', Math.round(pdfResponse.data.length / 1024), 'KB');
+
+    // Step 3: Build signers
+    console.log('\n3. Building signers list...');
+    const signers = buildSigners(signerData);
+    console.log('   ✓ Signers configured:', signers.length);
+    signers.forEach(s => console.log(`     - ${s.name} (${s.email}) - Order ${s.routingOrder}`));
+
+    // Step 4: Create envelope
+    console.log('\n4. Creating envelope...');
+    const envelopeDefinition = {
+      emailSubject: emailSubject || `Lease Agreement - ${signerData.propertyAddress || 'New Lease'}`,
+      documents: [{
+        documentBase64: pdfBase64,
+        name: 'Lease Agreement',
+        fileExtension: 'pdf',
+        documentId: '1'
+      }],
+      recipients: { signers: signers },
+      status: 'sent'  // 'sent' to send immediately, 'created' for draft
+    };
+
+    // Step 5: Send to DocuSign
+    const apiClient = new docusign.ApiClient();
+    apiClient.setBasePath(DOCUSIGN_CONFIG.basePath);
+    apiClient.addDefaultHeader('Authorization', `Bearer ${accessToken}`);
+
+    const envelopesApi = new docusign.EnvelopesApi(apiClient);
+    const results = await envelopesApi.createEnvelope(DOCUSIGN_CONFIG.accountId, {
+      envelopeDefinition: envelopeDefinition
+    });
+
+    console.log('   ✓ Envelope created and sent!');
+    console.log('   Envelope ID:', results.envelopeId);
+    console.log('   Status:', results.status);
+
+    res.json({
+      success: true,
+      envelopeId: results.envelopeId,
+      status: results.status,
+      message: 'Envelope sent successfully',
+      signerCount: signers.length
+    });
+
+  } catch (error) {
+    console.error('\n❌ DocuSign Error:', error.message);
+    if (error.response) {
+      console.error('Response:', JSON.stringify(error.response.body || error.response.data, null, 2));
+    }
+
+    res.status(500).json({
+      success: false,
+      error: error.message,
+      details: error.response?.body || error.response?.data || null
+    });
+  }
+});
+
+// =============================================================================
+// ENDPOINT: Check DocuSign Envelope Status
+// =============================================================================
+app.get('/api/docusign-status/:envelopeId', async (req, res) => {
+  console.log('\n========== DOCUSIGN STATUS CHECK ==========');
+
+  try {
+    const { envelopeId } = req.params;
+
+    // Get access token
+    const accessToken = await getDocuSignAccessToken();
+
+    // Set up API client
+    const apiClient = new docusign.ApiClient();
+    apiClient.setBasePath(DOCUSIGN_CONFIG.basePath);
+    apiClient.addDefaultHeader('Authorization', `Bearer ${accessToken}`);
+
+    const envelopesApi = new docusign.EnvelopesApi(apiClient);
+
+    // Get envelope status
+    const envelope = await envelopesApi.getEnvelope(DOCUSIGN_CONFIG.accountId, envelopeId);
+
+    // Get recipient status
+    const recipients = await envelopesApi.listRecipients(DOCUSIGN_CONFIG.accountId, envelopeId);
+
+    console.log('Envelope Status:', envelope.status);
+
+    res.json({
+      success: true,
+      envelopeId: envelopeId,
+      status: envelope.status,
+      statusDateTime: envelope.statusChangedDateTime,
+      sentDateTime: envelope.sentDateTime,
+      completedDateTime: envelope.completedDateTime,
+      recipients: recipients.signers?.map(s => ({
+        name: s.name,
+        email: s.email,
+        status: s.status,
+        signedDateTime: s.signedDateTime,
+        routingOrder: s.routingOrder
+      })) || []
+    });
+
+  } catch (error) {
+    console.error('Status Check Error:', error.message);
+    res.status(500).json({
+      success: false,
+      error: error.message
     });
   }
 });
@@ -711,6 +1008,8 @@ app.listen(PORT, () => {
   console.log(`🚀 Lease Generation API running on port ${PORT}`);
   console.log(`📍 Health check: http://localhost:${PORT}/`);
   console.log(`📄 Generate endpoint: POST http://localhost:${PORT}/api/generate-lease`);
+  console.log(`📤 DocuSign send: POST http://localhost:${PORT}/api/send-to-docusign`);
+  console.log(`📊 DocuSign status: GET http://localhost:${PORT}/api/docusign-status/:envelopeId`);
   console.log(`📋 List templates: GET http://localhost:${PORT}/api/templates`);
   console.log(`🔍 PDF fields: GET http://localhost:${PORT}/api/pdf-fields/{fileName}`);
   console.log(`🧪 Test PDF fill: POST http://localhost:${PORT}/api/test-pdf-fill`);
