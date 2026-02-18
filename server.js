@@ -37,8 +37,39 @@ const s3 = new AWS.S3(s3Config);
 const TEMPLATES_DIR = path.join(__dirname, 'templates');
 
 // =============================================================================
+// Helper: Get template file buffer (R2 key, or local fallback for plain filenames)
+// =============================================================================
+async function getTemplateBuffer(fileRef) {
+  const isR2Key = fileRef.includes('/');
+  
+  if (isR2Key) {
+    // Full R2 key provided (from V2 app) — fetch directly from R2
+    try {
+      console.log(`📥 Fetching from R2: ${fileRef}`);
+      const r2Result = await s3.getObject({
+        Bucket: process.env.S3_BUCKET_NAME,
+        Key: fileRef
+      }).promise();
+      console.log(`  ✓ Found in R2 (${Math.round(r2Result.ContentLength / 1024)} KB)`);
+      return Buffer.from(r2Result.Body);
+    } catch (r2Error) {
+      throw new Error(`Template not found in R2: ${fileRef}`);
+    }
+  } else {
+    // Plain filename (from Glide or legacy) — use local filesystem
+    const localPath = path.join(TEMPLATES_DIR, fileRef);
+    if (fs.existsSync(localPath)) {
+      console.log(`📂 Using local template: ${fileRef}`);
+      return fs.readFileSync(localPath);
+    }
+    throw new Error(`Template not found locally: ${fileRef}`);
+  }
+}
+
+// =============================================================================
 // DOCUSIGN CONFIGURATION
 // =============================================================================
+
 const DOCUSIGN_CONFIG = {
   integrationKey: process.env.DOCUSIGN_INTEGRATION_KEY,
   userId: process.env.DOCUSIGN_USER_ID,
@@ -67,8 +98,8 @@ const ADDENDUM_MAP = {
   includeLeadPaint: 'LEM_NJ_Lead_Paint_Addendum_2025-12-29.docx',
   includePetAddendum: 'LEM_Pet_2025-09.docx',
   includeCIS: 'NJAR_CIS_2025-15-12.pdf',
-  lemPet: 'LEM_Pet_2025-09.docx',      // Glide name
-  njarCIS: 'NJAR_CIS_2025-15-12.pdf',  // Glide name
+  lemPet: 'LEM_Pet_2025-09.docx',               // Glide name
+  njarCIS: 'NJAR_CIS_2025-15-12.pdf',            // Glide name
   njarLead: 'LEM_NJ_Lead_Paint_Addendum_2025-12-29.docx'  // Glide name
 };
 
@@ -78,31 +109,25 @@ const ADDENDUM_MAP = {
 const FIELD_MAP = {
   // ----- CORE / LEASE SELECTION -----
   'baseLease': 'selectedLease',
-  
   // ----- DATES & TERMS -----
   'leaseCommencement': 'commencement',
   'leaseTermination': 'endDate',
   'termMonths': 'term',
-  
   // ----- FINANCIAL -----
   'securityDeposit': 'security',
   'lostKeyFee': 'lostFee',
-  
   // ----- PROPERTY -----
   'propStreet1': 'propertyAddress',
   'unit': 'propertyUnit',
   'propCity': 'propertyCity',
   'propState': 'propertyState',
   'propZip': 'propertyZip',
-  
   // ----- PETS -----
   'petnumber': 'petNumber',
-  
   // ----- CIS PDF text fields (Glide name → PDF field name) -----
   'brokerageName': 'Brokerage Name',
   'agentName': 'agentName',
   'leaseDate': 'leaseDate',
-  
   // ----- Pet fields - spaces to camelCase (legacy support) -----
   'Pet 1 Name': 'pet1Name',
   'Pet 1 Type': 'pet1Type',
@@ -128,15 +153,9 @@ const FIELD_MAP = {
 
 // Control fields that should NOT be passed to templates
 const CONTROL_FIELDS = [
-  'documents',
-  'selectedLease',
-  'baseLease',
-  'includeLeadPaint', 
-  'includePetAddendum', 
-  'includeCIS',
-  'lemPet',
-  'njarCIS',
-  'njarLead',
+  'documents', 'selectedLease', 'baseLease',
+  'includeLeadPaint', 'includePetAddendum', 'includeCIS',
+  'lemPet', 'njarCIS', 'njarLead',
   'leaseData'  // For backwards compatibility with nested format
 ];
 
@@ -146,7 +165,7 @@ const CONTROL_FIELDS = [
 function applyFieldMapping(data) {
   const mapped = {};
   for (const [key, value] of Object.entries(data)) {
-    const newKey = FIELD_MAP[key] || key;  // Use mapped name or original
+    const newKey = FIELD_MAP[key] || key;   // Use mapped name or original
     mapped[newKey] = value;
   }
   return mapped;
@@ -156,7 +175,6 @@ function applyFieldMapping(data) {
 // Helper: Convert CIS boolean flags to radio group value
 // =============================================================================
 function applyCISRadioGroupMapping(data) {
-  // Convert individual boolean flags to single brokerRelationship radio value
   if (data.landlordAgent === true || data.landlordAgent === 'true') {
     data.brokerRelationship = 'sellersAgent';
   } else if (data.tenantAgent === true || data.tenantAgent === 'true') {
@@ -175,11 +193,9 @@ function applyCISRadioGroupMapping(data) {
 // Helper: Resolve lease name to filename
 // =============================================================================
 function resolveLeaseFilename(leaseName) {
-  // If it's already a filename (has extension), return as-is
   if (leaseName && (leaseName.endsWith('.docx') || leaseName.endsWith('.pdf'))) {
     return leaseName;
   }
-  // Otherwise, look up in map
   return LEASE_NAME_MAP[leaseName] || leaseName;
 }
 
@@ -193,7 +209,6 @@ async function getDocuSignAccessToken() {
   const apiClient = new docusign.ApiClient();
   apiClient.setOAuthBasePath(DOCUSIGN_CONFIG.oAuthBasePath);
 
-  // Handle private key - might have literal \n or actual newlines
   let privateKey = DOCUSIGN_CONFIG.privateKey;
   if (privateKey && privateKey.includes('\\n')) {
     privateKey = privateKey.replace(/\\n/g, '\n');
@@ -224,7 +239,6 @@ function buildSigners(data) {
   const signers = [];
   let recipientId = 1;
 
-  // Determine routing order based on whether agent is present
   const hasAgent = data.agentName && data.agentEmail;
   const agentOrder = 1;
   const tenantOrder = hasAgent ? 2 : 1;
@@ -248,10 +262,8 @@ function buildSigners(data) {
   // Tenant 1 (required)
   if (data.tenant1Name && data.tenant1Email) {
     signers.push({
-      email: data.tenant1Email,
-      name: data.tenant1Name,
-      recipientId: String(recipientId++),
-      routingOrder: String(tenantOrder),
+      email: data.tenant1Email, name: data.tenant1Name,
+      recipientId: String(recipientId++), routingOrder: String(tenantOrder),
       tabs: {
         signHereTabs: [{ anchorString: '[[Tenant1_Signature]]', anchorUnits: 'pixels', anchorXOffset: '0', anchorYOffset: '-5', anchorIgnoreIfNotPresent: 'false' }],
         dateSignedTabs: [{ anchorString: '[[Tenant1_Date]]', anchorUnits: 'pixels', anchorXOffset: '0', anchorYOffset: '-5', anchorIgnoreIfNotPresent: 'true' }],
@@ -263,10 +275,8 @@ function buildSigners(data) {
   // Tenant 2 (optional)
   if (data.tenant2Name && data.tenant2Email) {
     signers.push({
-      email: data.tenant2Email,
-      name: data.tenant2Name,
-      recipientId: String(recipientId++),
-      routingOrder: String(tenantOrder),
+      email: data.tenant2Email, name: data.tenant2Name,
+      recipientId: String(recipientId++), routingOrder: String(tenantOrder),
       tabs: {
         signHereTabs: [{ anchorString: '[[Tenant2_Signature]]', anchorUnits: 'pixels', anchorXOffset: '0', anchorYOffset: '-5', anchorIgnoreIfNotPresent: 'true' }],
         dateSignedTabs: [{ anchorString: '[[Tenant2_Date]]', anchorUnits: 'pixels', anchorXOffset: '0', anchorYOffset: '-5', anchorIgnoreIfNotPresent: 'true' }],
@@ -278,10 +288,8 @@ function buildSigners(data) {
   // Tenant 3 (optional)
   if (data.tenant3Name && data.tenant3Email) {
     signers.push({
-      email: data.tenant3Email,
-      name: data.tenant3Name,
-      recipientId: String(recipientId++),
-      routingOrder: String(tenantOrder),
+      email: data.tenant3Email, name: data.tenant3Name,
+      recipientId: String(recipientId++), routingOrder: String(tenantOrder),
       tabs: {
         signHereTabs: [{ anchorString: '[[Tenant3_Signature]]', anchorUnits: 'pixels', anchorXOffset: '0', anchorYOffset: '-5', anchorIgnoreIfNotPresent: 'true' }],
         dateSignedTabs: [{ anchorString: '[[Tenant3_Date]]', anchorUnits: 'pixels', anchorXOffset: '0', anchorYOffset: '-5', anchorIgnoreIfNotPresent: 'true' }],
@@ -293,10 +301,8 @@ function buildSigners(data) {
   // Tenant 4 (optional)
   if (data.tenant4Name && data.tenant4Email) {
     signers.push({
-      email: data.tenant4Email,
-      name: data.tenant4Name,
-      recipientId: String(recipientId++),
-      routingOrder: String(tenantOrder),
+      email: data.tenant4Email, name: data.tenant4Name,
+      recipientId: String(recipientId++), routingOrder: String(tenantOrder),
       tabs: {
         signHereTabs: [{ anchorString: '[[Tenant4_Signature]]', anchorUnits: 'pixels', anchorXOffset: '0', anchorYOffset: '-5', anchorIgnoreIfNotPresent: 'true' }],
         dateSignedTabs: [{ anchorString: '[[Tenant4_Date]]', anchorUnits: 'pixels', anchorXOffset: '0', anchorYOffset: '-5', anchorIgnoreIfNotPresent: 'true' }],
@@ -308,10 +314,8 @@ function buildSigners(data) {
   // Landlord (required - signs last)
   if (data.landlordSignor && data.landlordEmail) {
     signers.push({
-      email: data.landlordEmail,
-      name: data.landlordSignor,
-      recipientId: String(recipientId++),
-      routingOrder: String(landlordOrder),
+      email: data.landlordEmail, name: data.landlordSignor,
+      recipientId: String(recipientId++), routingOrder: String(landlordOrder),
       tabs: {
         signHereTabs: [{ anchorString: '[[Landlord_Signature]]', anchorUnits: 'pixels', anchorXOffset: '0', anchorYOffset: '-5', anchorIgnoreIfNotPresent: 'false' }],
         dateSignedTabs: [{ anchorString: '[[Landlord_Date]]', anchorUnits: 'pixels', anchorXOffset: '0', anchorYOffset: '-5', anchorIgnoreIfNotPresent: 'true' }],
@@ -325,8 +329,8 @@ function buildSigners(data) {
 
 // Health check endpoint
 app.get('/', (req, res) => {
-  res.json({ 
-    status: 'ok', 
+  res.json({
+    status: 'ok',
     message: 'Lease Generation API is running',
     timestamp: new Date().toISOString()
   });
@@ -337,25 +341,17 @@ app.get('/', (req, res) => {
 // =============================================================================
 app.post('/api/generate-lease', async (req, res) => {
   try {
-    // Extract control fields
-    const { 
-      documents,
-      selectedLease,
-      includeLeadPaint,
-      includePetAddendum,
-      includeCIS,
-      leaseData: nestedLeaseData  // For backwards compatibility
+    const {
+      documents, selectedLease,
+      includeLeadPaint, includePetAddendum, includeCIS,
+      leaseData: nestedLeaseData
     } = req.body;
 
-    // Build leaseData: either from nested object OR from flat fields
     let leaseData;
-    
     if (nestedLeaseData && typeof nestedLeaseData === 'object') {
-      // Backwards compatible: nested leaseData object provided
       console.log('📋 Using nested leaseData format (backwards compatible)');
       leaseData = applyFieldMapping(nestedLeaseData);
     } else {
-      // New flat format: everything except control fields IS the lease data
       console.log('📋 Using flat payload format (Glide-friendly)');
       let rawData = {};
       for (const [key, value] of Object.entries(req.body)) {
@@ -363,37 +359,28 @@ app.post('/api/generate-lease', async (req, res) => {
           rawData[key] = value;
         }
       }
-      // Apply field name mapping (Glide names → template names)
       leaseData = applyFieldMapping(rawData);
     }
 
-    // Apply CIS radio group mapping (convert booleans to single radio value)
     leaseData = applyCISRadioGroupMapping(leaseData);
 
-    // Get base lease from either field name (support both)
     const baseLeaseName = req.body.selectedLease || req.body.baseLease;
 
-    // Build documents array - either from direct array or from booleans
     let docsToProcess = [];
-    
+
     if (documents && documents.length > 0) {
-      // Direct array mode (Postman, testing, advanced use)
       docsToProcess = [...documents];
       console.log('📋 Using direct documents array');
     } else if (baseLeaseName) {
-      // Glide-friendly mode: build array from booleans
       console.log('📋 Building documents from boolean flags');
-      
-      // Resolve lease name to filename (e.g., "LEM NJ Lease" → "LEM_NJ_Residential_Lease_2025-12-29.docx")
       const resolvedLease = resolveLeaseFilename(baseLeaseName);
       console.log(`📋 Resolved lease: "${baseLeaseName}" → "${resolvedLease}"`);
       docsToProcess.push(resolvedLease);
-      
-      // Add addenda based on boolean flags (support both naming conventions)
+
       const addLeadPaint = req.body.includeLeadPaint || req.body.njarLead;
       const addPet = req.body.includePetAddendum || req.body.lemPet;
       const addCIS = req.body.includeCIS || req.body.njarCIS;
-      
+
       if (addLeadPaint && ADDENDUM_MAP.includeLeadPaint) {
         docsToProcess.push(ADDENDUM_MAP.includeLeadPaint);
       }
@@ -412,7 +399,6 @@ app.post('/api/generate-lease', async (req, res) => {
       fieldCount: Object.keys(leaseData).length
     });
 
-    // Validation
     if (!leaseData || Object.keys(leaseData).length === 0) {
       return res.status(400).json({
         success: false,
@@ -431,14 +417,15 @@ app.post('/api/generate-lease', async (req, res) => {
     const processedDocs = [];
     const warnings = [];
 
-    // Process each document in order
     for (const doc of docsToProcess) {
       const fileName = typeof doc === 'string' ? doc : doc.fileName;
-      const filePath = path.join(TEMPLATES_DIR, fileName);
 
-      if (!fs.existsSync(filePath)) {
+      let templateBuffer;
+      try {
+        templateBuffer = await getTemplateBuffer(fileName);
+      } catch (fetchError) {
         warnings.push(`File not found: ${fileName}`);
-        console.warn(`⚠ File not found: ${fileName}`);
+        console.warn(`⚠ ${fetchError.message}`);
         continue;
       }
 
@@ -446,19 +433,15 @@ app.post('/api/generate-lease', async (req, res) => {
 
       try {
         if (ext === '.docx') {
-          // Word template - fill and convert to PDF
           console.log(`📄 Processing Word template: ${fileName}`);
-          const pdfBuffer = await fillWordTemplate(filePath, leaseData);
+          const pdfBuffer = await fillWordTemplate(templateBuffer, leaseData);
           pdfBuffers.push(pdfBuffer);
           processedDocs.push({ fileName, type: 'word', status: 'success' });
-
         } else if (ext === '.pdf') {
-          // PDF - check if fillable or static
           console.log(`📋 Processing PDF: ${fileName}`);
-          const pdfBuffer = await processPdf(filePath, leaseData);
+          const pdfBuffer = await processPdf(templateBuffer, leaseData);
           pdfBuffers.push(pdfBuffer);
           processedDocs.push({ fileName, type: 'pdf', status: 'success' });
-
         } else {
           warnings.push(`Unsupported file type: ${fileName}`);
           console.warn(`⚠ Unsupported file type: ${fileName}`);
@@ -469,7 +452,6 @@ app.post('/api/generate-lease', async (req, res) => {
       }
     }
 
-    // Check if we have any documents to merge
     if (pdfBuffers.length === 0) {
       return res.status(400).json({
         success: false,
@@ -478,7 +460,6 @@ app.post('/api/generate-lease', async (req, res) => {
       });
     }
 
-    // Merge all PDFs into single package
     let finalPdfBuffer;
     if (pdfBuffers.length === 1) {
       finalPdfBuffer = pdfBuffers[0];
@@ -487,10 +468,9 @@ app.post('/api/generate-lease', async (req, res) => {
       finalPdfBuffer = await mergePdfs(pdfBuffers);
     }
 
-    // Upload to S3/R2
     const fileName = `lease-${leaseData.leaseId || Date.now()}.pdf`;
     const s3Key = `leases/${fileName}`;
-    
+
     const uploadParams = {
       Bucket: process.env.S3_BUCKET_NAME,
       Key: s3Key,
@@ -500,8 +480,7 @@ app.post('/api/generate-lease', async (req, res) => {
 
     console.log(`☁ Uploading to storage: ${s3Key}`);
     const uploadResult = await s3.upload(uploadParams).promise();
-    
-    // Generate signed preview URL (1 hour expiry)
+
     const previewUrl = s3.getSignedUrl('getObject', {
       Bucket: process.env.S3_BUCKET_NAME,
       Key: s3Key,
@@ -545,7 +524,6 @@ app.post('/api/send-to-docusign', async (req, res) => {
   try {
     const { pdfUrl, emailSubject, ...signerData } = req.body;
 
-    // Validate required fields
     if (!pdfUrl) {
       return res.status(400).json({ success: false, error: 'Missing required field: pdfUrl' });
     }
@@ -559,24 +537,20 @@ app.post('/api/send-to-docusign', async (req, res) => {
     console.log('PDF URL:', pdfUrl);
     console.log('Signers:', JSON.stringify(signerData, null, 2));
 
-    // Step 1: Get access token
     console.log('\n1. Authenticating with DocuSign...');
     const accessToken = await getDocuSignAccessToken();
-    console.log('   ✓ Authentication successful');
+    console.log('  ✓ Authentication successful');
 
-    // Step 2: Download the PDF
     console.log('\n2. Downloading PDF from R2...');
     const pdfResponse = await axios.get(pdfUrl, { responseType: 'arraybuffer' });
     const pdfBase64 = Buffer.from(pdfResponse.data).toString('base64');
-    console.log('   ✓ PDF downloaded, size:', Math.round(pdfResponse.data.length / 1024), 'KB');
+    console.log('  ✓ PDF downloaded, size:', Math.round(pdfResponse.data.length / 1024), 'KB');
 
-    // Step 3: Build signers
     console.log('\n3. Building signers list...');
     const signers = buildSigners(signerData);
-    console.log('   ✓ Signers configured:', signers.length);
-    signers.forEach(s => console.log(`     - ${s.name} (${s.email}) - Order ${s.routingOrder}`));
+    console.log('  ✓ Signers configured:', signers.length);
+    signers.forEach(s => console.log(`    - ${s.name} (${s.email}) - Order ${s.routingOrder}`));
 
-    // Step 4: Create envelope
     console.log('\n4. Creating envelope...');
     const envelopeDefinition = {
       emailSubject: emailSubject || `Lease Agreement - ${signerData.propertyAddress || 'New Lease'}`,
@@ -587,10 +561,9 @@ app.post('/api/send-to-docusign', async (req, res) => {
         documentId: '1'
       }],
       recipients: { signers: signers },
-      status: 'sent'  // 'sent' to send immediately, 'created' for draft
+      status: 'sent'
     };
 
-    // Step 5: Send to DocuSign
     const apiClient = new docusign.ApiClient();
     apiClient.setBasePath(DOCUSIGN_CONFIG.basePath);
     apiClient.addDefaultHeader('Authorization', `Bearer ${accessToken}`);
@@ -600,9 +573,9 @@ app.post('/api/send-to-docusign', async (req, res) => {
       envelopeDefinition: envelopeDefinition
     });
 
-    console.log('   ✓ Envelope created and sent!');
-    console.log('   Envelope ID:', results.envelopeId);
-    console.log('   Status:', results.status);
+    console.log('  ✓ Envelope created and sent!');
+    console.log('  Envelope ID:', results.envelopeId);
+    console.log('  Status:', results.status);
 
     res.json({
       success: true,
@@ -617,7 +590,6 @@ app.post('/api/send-to-docusign', async (req, res) => {
     if (error.response) {
       console.error('Response:', JSON.stringify(error.response.body || error.response.data, null, 2));
     }
-
     res.status(500).json({
       success: false,
       error: error.message,
@@ -631,24 +603,18 @@ app.post('/api/send-to-docusign', async (req, res) => {
 // =============================================================================
 app.get('/api/docusign-status/:envelopeId', async (req, res) => {
   console.log('\n========== DOCUSIGN STATUS CHECK ==========');
-
   try {
     const { envelopeId } = req.params;
 
-    // Get access token
     const accessToken = await getDocuSignAccessToken();
 
-    // Set up API client
     const apiClient = new docusign.ApiClient();
     apiClient.setBasePath(DOCUSIGN_CONFIG.basePath);
     apiClient.addDefaultHeader('Authorization', `Bearer ${accessToken}`);
 
     const envelopesApi = new docusign.EnvelopesApi(apiClient);
 
-    // Get envelope status
     const envelope = await envelopesApi.getEnvelope(DOCUSIGN_CONFIG.accountId, envelopeId);
-
-    // Get recipient status
     const recipients = await envelopesApi.listRecipients(DOCUSIGN_CONFIG.accountId, envelopeId);
 
     console.log('Envelope Status:', envelope.status);
@@ -671,36 +637,32 @@ app.get('/api/docusign-status/:envelopeId', async (req, res) => {
 
   } catch (error) {
     console.error('Status Check Error:', error.message);
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 
 // =============================================================================
 // PDF Processing - Auto-detect fillable vs static
 // =============================================================================
-async function processPdf(pdfPath, data) {
+async function processPdf(pdfBuffer, data) {
   try {
-    const pdfBytes = fs.readFileSync(pdfPath);
+    const pdfBytes = pdfBuffer;
     const pdfDoc = await PDFDocument.load(pdfBytes);
     const form = pdfDoc.getForm();
     const fields = form.getFields();
 
     if (fields.length > 0) {
-      // Fillable PDF - fill the fields
       console.log(`  → Fillable PDF with ${fields.length} fields`);
       return await fillPdfForm(pdfDoc, form, fields, data);
     } else {
-      // Static PDF - return as-is
       console.log(`  → Static PDF (no form fields)`);
       return pdfBytes;
     }
+
   } catch (error) {
     // If we can't parse it as fillable, return as static
     console.log(`  → Treating as static PDF`);
-    return fs.readFileSync(pdfPath);
+    return pdfBuffer;
   }
 }
 
@@ -712,10 +674,9 @@ async function fillPdfForm(pdfDoc, form, fields, data) {
     for (const field of fields) {
       const fieldName = field.getName();
       const fieldType = field.constructor.name;
-      
-      // Try to find matching data: exact match, then camelCase conversion
+
       let value = data[fieldName] ?? data[toCamelCase(fieldName)] ?? null;
-      
+
       if (value !== null && value !== undefined && value !== '') {
         try {
           if (fieldType === 'PDFTextField') {
@@ -731,21 +692,21 @@ async function fillPdfForm(pdfDoc, form, fields, data) {
           } else if (fieldType === 'PDFRadioGroup') {
             const radioGroup = form.getRadioGroup(fieldName);
             radioGroup.select(String(value));
-            console.log(`    ✓ RadioGroup ${fieldName} = "${value}"`);
+            console.log(`  ✓ RadioGroup ${fieldName} = "${value}"`);
           } else if (fieldType === 'PDFDropdown') {
             const dropdown = form.getDropdown(fieldName);
             dropdown.select(String(value));
           }
+
           if (fieldType !== 'PDFRadioGroup') {
-            console.log(`    ✓ ${fieldName} = "${value}"`);
+            console.log(`  ✓ ${fieldName} = "${value}"`);
           }
         } catch (fieldError) {
-          console.warn(`    ✗ Could not fill ${fieldName}: ${fieldError.message}`);
+          console.warn(`  ✗ Could not fill ${fieldName}: ${fieldError.message}`);
         }
       }
     }
 
-    // Flatten form to prevent editing
     form.flatten();
     const filledPdfBytes = await pdfDoc.save();
     return Buffer.from(filledPdfBytes);
@@ -762,13 +723,13 @@ async function fillPdfForm(pdfDoc, form, fields, data) {
 async function mergePdfs(pdfBuffers) {
   try {
     const mergedPdf = await PDFDocument.create();
-    
+
     for (const pdfBuffer of pdfBuffers) {
       const pdf = await PDFDocument.load(pdfBuffer);
       const pages = await mergedPdf.copyPages(pdf, pdf.getPageIndices());
       pages.forEach(page => mergedPdf.addPage(page));
     }
-    
+
     const mergedPdfBytes = await mergedPdf.save();
     return Buffer.from(mergedPdfBytes);
 
@@ -781,15 +742,15 @@ async function mergePdfs(pdfBuffers) {
 // =============================================================================
 // Word Template Filling
 // =============================================================================
-async function fillWordTemplate(templatePath, data) {
+async function fillWordTemplate(templateBuffer, data) {
   try {
-    const content = fs.readFileSync(templatePath);
+    const content = templateBuffer;
     const zip = new PizZip(content);
-    
+
     const doc = new Docxtemplater(zip, {
       paragraphLoop: true,
       linebreaks: true,
-      nullGetter: () => ''  // Empty string for missing fields
+      nullGetter: () => ''
     });
 
     doc.render(data);
@@ -807,7 +768,7 @@ async function fillWordTemplate(templatePath, data) {
 
     const tempDocxPath = path.join(tempDir, `temp-${Date.now()}.docx`);
     const tempPdfPath = tempDocxPath.replace('.docx', '.pdf');
-    
+
     fs.writeFileSync(tempDocxPath, filledDocx);
 
     try {
@@ -823,7 +784,7 @@ async function fillWordTemplate(templatePath, data) {
     if (!fs.existsSync(tempPdfPath)) {
       throw new Error('PDF file was not generated');
     }
-    
+
     const pdfBuffer = fs.readFileSync(tempPdfPath);
 
     // Cleanup temp files
@@ -843,7 +804,7 @@ async function fillWordTemplate(templatePath, data) {
 // =============================================================================
 function toCamelCase(str) {
   return str
-    .replace(/(?:^\w|[A-Z]|\b\w)/g, (word, index) => 
+    .replace(/(?:^\w|[A-Z]|\b\w)/g, (word, index) =>
       index === 0 ? word.toLowerCase() : word.toUpperCase()
     )
     .replace(/\s+/g, '')
@@ -869,12 +830,9 @@ app.get('/api/templates', (req, res) => {
           type: ext === '.docx' ? 'word' : 'pdf'
         };
       });
-    
-    res.json({
-      success: true,
-      templates: files,
-      count: files.length
-    });
+
+    res.json({ success: true, templates: files, count: files.length });
+
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
   }
@@ -886,35 +844,31 @@ app.get('/api/templates', (req, res) => {
 app.get('/api/pdf-fields/:fileName', async (req, res) => {
   try {
     const { fileName } = req.params;
-    
-    // Add .pdf extension if not provided
     const pdfFileName = fileName.endsWith('.pdf') ? fileName : `${fileName}.pdf`;
-    const pdfPath = path.join(TEMPLATES_DIR, pdfFileName);
-    
-    if (!fs.existsSync(pdfPath)) {
-      return res.status(404).json({
-        success: false,
-        error: `PDF not found: ${pdfFileName}`
-      });
+
+    let pdfBytes;
+    try {
+      pdfBytes = await getTemplateBuffer(pdfFileName);
+    } catch (err) {
+      return res.status(404).json({ success: false, error: err.message });
     }
 
-    const pdfBytes = fs.readFileSync(pdfPath);
     const pdfDoc = await PDFDocument.load(pdfBytes);
     const form = pdfDoc.getForm();
     const fields = form.getFields();
 
     const fieldInfo = fields.map(field => {
       const fieldType = field.constructor.name;
-      const info = { 
-        name: field.getName(), 
+      const info = {
+        name: field.getName(),
         type: fieldType.replace('PDF', '').replace('Field', '')
       };
 
       if (fieldType === 'PDFRadioGroup') {
-        try { info.options = form.getRadioGroup(field.getName()).getOptions(); } 
+        try { info.options = form.getRadioGroup(field.getName()).getOptions(); }
         catch (e) { info.options = []; }
       } else if (fieldType === 'PDFDropdown') {
-        try { info.options = form.getDropdown(field.getName()).getOptions(); } 
+        try { info.options = form.getDropdown(field.getName()).getOptions(); }
         catch (e) { info.options = []; }
       }
 
@@ -941,22 +895,17 @@ app.post('/api/test-pdf-fill', async (req, res) => {
     const { fileName, leaseData } = req.body;
 
     if (!fileName || !leaseData) {
-      return res.status(400).json({
-        success: false,
-        error: 'Missing required fields: fileName and leaseData'
-      });
+      return res.status(400).json({ success: false, error: 'Missing required fields: fileName and leaseData' });
     }
 
-    const pdfPath = path.join(TEMPLATES_DIR, fileName);
-    
-    if (!fs.existsSync(pdfPath)) {
-      return res.status(404).json({
-        success: false,
-        error: `PDF not found: ${fileName}`
-      });
+    let templateBuffer;
+    try {
+      templateBuffer = await getTemplateBuffer(fileName);
+    } catch (err) {
+      return res.status(404).json({ success: false, error: err.message });
     }
 
-    const filledPdf = await processPdf(pdfPath, leaseData);
+    const filledPdf = await processPdf(templateBuffer, leaseData);
 
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `inline; filename="test-${fileName}"`);
@@ -975,22 +924,17 @@ app.post('/api/test-word-fill', async (req, res) => {
     const { fileName, leaseData } = req.body;
 
     if (!fileName || !leaseData) {
-      return res.status(400).json({
-        success: false,
-        error: 'Missing required fields: fileName and leaseData'
-      });
+      return res.status(400).json({ success: false, error: 'Missing required fields: fileName and leaseData' });
     }
 
-    const docxPath = path.join(TEMPLATES_DIR, fileName);
-    
-    if (!fs.existsSync(docxPath)) {
-      return res.status(404).json({
-        success: false,
-        error: `Word template not found: ${fileName}`
-      });
+    let templateBuffer;
+    try {
+      templateBuffer = await getTemplateBuffer(fileName);
+    } catch (err) {
+      return res.status(404).json({ success: false, error: err.message });
     }
 
-    const filledPdf = await fillWordTemplate(docxPath, leaseData);
+    const filledPdf = await fillWordTemplate(templateBuffer, leaseData);
 
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `inline; filename="test-${fileName.replace('.docx', '.pdf')}"`);
