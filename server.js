@@ -522,7 +522,7 @@ app.post('/api/send-to-docusign', async (req, res) => {
   console.log('Timestamp:', new Date().toISOString());
 
   try {
-    const { pdfUrl, emailSubject, ...signerData } = req.body;
+ const { pdfUrl, coverLetterUrl, emailSubject, ...signerData } = req.body;
 
     if (!pdfUrl) {
       return res.status(400).json({ success: false, error: 'Missing required field: pdfUrl' });
@@ -541,10 +541,22 @@ app.post('/api/send-to-docusign', async (req, res) => {
     const accessToken = await getDocuSignAccessToken();
     console.log('  ✓ Authentication successful');
 
-    console.log('\n2. Downloading PDF from R2...');
-    const pdfResponse = await axios.get(pdfUrl, { responseType: 'arraybuffer' });
-    const pdfBase64 = Buffer.from(pdfResponse.data).toString('base64');
-    console.log('  ✓ PDF downloaded, size:', Math.round(pdfResponse.data.length / 1024), 'KB');
+    const envelopeDocuments = [];
+let documentId = 1;
+
+if (coverLetterUrl) {
+  console.log('\n2a. Downloading cover letter from R2...');
+  const coverLetterResponse = await axios.get(coverLetterUrl, { responseType: 'arraybuffer' });
+  const coverLetterBase64 = Buffer.from(coverLetterResponse.data).toString('base64');
+  console.log('  ✓ Cover letter downloaded, size:', Math.round(coverLetterResponse.data.length / 1024), 'KB');
+  envelopeDocuments.push({ documentBase64: coverLetterBase64, name: 'Cover Letter', fileExtension: 'pdf', documentId: String(documentId++) });
+}
+
+console.log('\n2b. Downloading lease PDF from R2...');
+const pdfResponse = await axios.get(pdfUrl, { responseType: 'arraybuffer' });
+const pdfBase64 = Buffer.from(pdfResponse.data).toString('base64');
+console.log('  ✓ Lease PDF downloaded, size:', Math.round(pdfResponse.data.length / 1024), 'KB');
+envelopeDocuments.push({ documentBase64: pdfBase64, name: 'Lease Agreement', fileExtension: 'pdf', documentId: String(documentId++) });
 
     console.log('\n3. Building signers list...');
     const signers = buildSigners(signerData);
@@ -554,12 +566,7 @@ app.post('/api/send-to-docusign', async (req, res) => {
     console.log('\n4. Creating envelope...');
     const envelopeDefinition = {
       emailSubject: emailSubject || `Lease Agreement - ${signerData.propertyAddress || 'New Lease'}`,
-      documents: [{
-        documentBase64: pdfBase64,
-        name: 'Lease Agreement',
-        fileExtension: 'pdf',
-        documentId: '1'
-      }],
+documents: envelopeDocuments,
       recipients: { signers: signers },
       status: 'sent'
     };
