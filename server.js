@@ -951,7 +951,47 @@ app.post('/api/test-word-fill', async (req, res) => {
     res.status(500).json({ success: false, error: error.message });
   }
 });
+// ============================================================
+// Void DocuSign Envelope
+// ============================================================
+app.post('/api/void-envelope', async (req, res) => {
+  try {
+    const { envelopeId, voidReason } = req.body;
 
+    if (!envelopeId || !voidReason) {
+      return res.status(400).json({ success: false, error: 'Missing envelopeId or voidReason' });
+    }
+
+    console.log(`Voiding envelope ${envelopeId} — reason: ${voidReason}`);
+
+    const accessToken = await getDocuSignAccessToken();
+
+    const response = await fetch(
+      `${process.env.DOCUSIGN_BASE_PATH}/v2.1/accounts/${process.env.DOCUSIGN_ACCOUNT_ID}/envelopes/${envelopeId}`,
+      {
+        method: 'PUT',
+        headers: {
+          'Authorization': `Bearer ${accessToken}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ status: 'voided', voidedReason: voidReason })
+      }
+    );
+
+    if (!response.ok) {
+      const error = await response.text();
+      console.error('DocuSign void error:', error);
+      return res.status(500).json({ success: false, error });
+    }
+
+    console.log(`✓ Envelope ${envelopeId} voided successfully`);
+    res.json({ success: true, envelopeId });
+
+  } catch (error) {
+    console.error('Void envelope error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
 // =============================================================================
 // Start Server
 // =============================================================================
